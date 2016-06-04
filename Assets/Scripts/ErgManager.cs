@@ -19,7 +19,7 @@ public class ErgManager : MonoBehaviour
     public GameObject boatType;
     public int numLanes = 5;
     public int playerLaneIndex = 2;
-    public double laneDistance = 20.0;
+    public float laneDistance = 4.0f;
     IList<Vector3> freeLanes = new List<Vector3>(); //these are the lanes for bots
     Vector3 playerLane = new Vector3(); //position of the lane where the player is on
     
@@ -30,18 +30,18 @@ public class ErgManager : MonoBehaviour
         Debug.Log("Starting up NetMQ interface");
         context = NetMQContext.Create();
         subSocket = context.CreateSubscriberSocket();
-        subSocket.Connect("tcp://127.0.0.1:21744");
+        subSocket.Connect("tcp://127.0.0.1:21743");
         subSocket.Subscribe("EasyErgsocket");
     }
 
     private void initLanes()
     {
         //populate the lane list according to the given values
-        double startDistance = 0.0 - (laneDistance * playerLaneIndex);
+        float startDistance = 0.0f - (laneDistance * playerLaneIndex);
         for (int index = 0; index < numLanes; index++)
         {
             Vector3 newLanePos = transform.position;
-            newLanePos.z = (float)(startDistance + (laneDistance * index));
+            newLanePos.z = startDistance + (laneDistance * index);
             if (index == playerLaneIndex)
             {
                 playerLane = newLanePos;
@@ -55,9 +55,41 @@ public class ErgManager : MonoBehaviour
 
     void Update()
     {
-        //try to receive something from the network... if that succeeds get the distance from the given Erg
+        //Try to receive data and apply it to the boats
+        IList<Erg> receivedBoats = ReceiveBoats();
+        foreach (EasyErgsocket.Erg erg in receivedBoats)
+        {
+            UpdateErg(erg);
+        }
+
+        //do not do anything more if there's no player available
+        if (!boats.ContainsKey(playerIndex))
+        {
+            return;
+        }
+
+        //if there's a player we need to modify the other boats
+        Boat playerBoat = boats[playerIndex].GetComponentInChildren<Boat>();
+        float playerDistance = playerBoat.Distance;
+
+        StatDisplayManager.Instance.UpdatePosition(playerDistance);
+        foreach (var boat in boats)
+        {
+            //update the bots in relation to the players boat
+            if (boat.Key != playerIndex)
+            {
+                Boat currentBoat = boat.Value.GetComponentInChildren<Boat>();
+                currentBoat.AttachToBoat(playerDistance);
+            }
+        }
+    }
+
+    private IList<Erg> ReceiveBoats()
+    {
+        //try to receive something from the network... return all the ergs we get
         var message = new NetMQMessage();
-        if (subSocket.TryReceiveMultipartMessage(System.TimeSpan.Zero, ref message))
+        IList<EasyErgsocket.Erg> receivedBoats = new List<EasyErgsocket.Erg>();
+        while (subSocket.TryReceiveMultipartMessage(System.TimeSpan.Zero, ref message))
         {
             foreach (var frame in message.Skip(1)) //the first frame is always just the envelope/topic... let's ignore it by using Linq
             {
@@ -65,29 +97,12 @@ public class ErgManager : MonoBehaviour
                 using (System.IO.MemoryStream memoryStream = new System.IO.MemoryStream(rawMessage))
                 {
                     var givenErg = Serializer.Deserialize<EasyErgsocket.Erg>(memoryStream);
-                    UpdateErg(givenErg);
+                    receivedBoats.Add(givenErg);
                 }
             }
         }
 
-        //update the statsdisplay and all the other important things
-        if(boats.ContainsKey(playerIndex))
-        {
-            Boat playerBoat = boats[playerIndex].GetComponentInChildren<Boat>();
-            StatDisplayManager.Instance.UpdatePosition(playerBoat.Distance);
-
-            foreach (var boat in boats)
-            {
-                //do not update the playerboat with itself
-                if(boat.Key == playerIndex)
-                {
-                    continue;
-                }
-
-                Boat currentBoat = boat.Value.GetComponentInChildren<Boat>();
-                currentBoat.AttachToBoat(playerBoat.Distance);
-            }
-        }
+        return receivedBoats;
     }
 
     private void UpdateErg(Erg givenErg)
@@ -97,9 +112,9 @@ public class ErgManager : MonoBehaviour
         {
             CreateBoat(givenErg);
         }
-        
-        //update the boats distance
-        boats[givenErg.ergId].GetComponent<Boat>().Distance = (float)givenErg.distance;
+
+        Boat boat = boats[givenErg.ergId].GetComponentInChildren<Boat>();
+        boat.UpdatePosition((float)givenErg.distance, (float)givenErg.exerciseTime);
 
         //update the stats on the track
         if (givenErg.playertype == EasyErgsocket.PlayerType.HUMAN)
